@@ -1,0 +1,467 @@
+# Library Management System — Code Documentation
+
+> Minimalist C console application that manages books and members using plain-text pipe-delimited files. No databases or external libraries required.
+
+---
+
+## 1. System Overview
+
+A simple CLI program that stores and manages a small library collection and members using two files:
+
+* `books.txt` — stores book records in the format `title|author|year`
+* `members.txt` — stores member records in the format `id|name|current_book_title`
+
+**Core features**
+
+* Books: Add, list, search (substring), delete
+* Members: Add, list
+* Circulation: Issue one book per member, return books
+* Persistence: Data saved to disk after every modification
+
+**Architecture & Design Choices**
+
+* Fixed-size arrays (up to 256 books and 256 members) for simplicity and easy explanation in viva
+* All data loaded at startup and saved after each write operation
+* No dynamic memory allocation — avoids memory leaks and keeps code beginner-friendly
+* Pipe-delimited files make manual inspection and debugging easy
+
+---
+
+## 2. Configuration & Data Structures
+
+### Constants
+
+```c
+#define DB_BOOK   "books.txt"
+#define DB_MEMBER "members.txt"
+#define MAX       1024          /* Buffer size for fgets */
+#define MAXB      256           /* Max books in array */
+#define MAXM      256           /* Max members in array */
+#define FLEN      60            /* Max field length (title, author, name) */
+```
+
+**Purpose:** Centralized constants make it easy to adjust limits without scattering magic numbers through the code.
+
+### Book structure
+
+```c
+typedef struct {
+    char title[FLEN];
+    char author[FLEN];
+    int  year;
+} Book;
+```
+
+**Purpose:** Stores book metadata.
+
+* `title`: Book title (max 59 chars + null terminator)
+* `author`: Author name (max 59 chars)
+* `year`: Publication year
+
+### Member structure
+
+```c
+typedef struct {
+    int  id;
+    char name[FLEN];
+    char current[FLEN];   /* title of issued book, empty string if none */
+} Member;
+```
+
+**Purpose:** Tracks member information and current book status.
+
+* `id`: Unique numeric identifier
+* `name`: Member name (max 59 chars)
+* `current`: Stores issued book title; empty means no book issued
+
+---
+
+## 3. File I/O Operations
+
+### Load books from file
+
+```c
+int load_books(Book *b) {
+    FILE *f = fopen(DB_BOOK, "r");
+    int n = 0;
+    if (!f) return 0;
+    while (n < MAXB &&
+           fscanf(f, " %60[^|]|%60[^|]|%d\n", b[n].title, b[n].author, &b[n].year) == 3)
+        ++n;
+    fclose(f);
+    return n;
+}
+```
+
+**Purpose:** Reads all books from disk into a memory array.
+
+**Parameters:**
+
+* `b`: Pointer to a `Book` array to fill
+
+**Returns:** Number of books loaded (0 if file doesn't exist)
+
+**Notes / Logic:**
+
+* Opens file read-only; returns 0 silently if missing (first run)
+* Uses `fscanf` with `[^|]` conversion to parse pipe-delimited fields safely
+* Loop stops when array is full or parsing fails
+* Closes file and returns count
+* Missing file is treated as an empty database; malformed lines are skipped silently
+
+### Save books to file
+
+```c
+void save_books(Book *b, int n) {
+    FILE *f = fopen(DB_BOOK, "w");
+    for (int i = 0; i < n; i++)
+        fprintf(f, "%s|%s|%d\n", b[i].title, b[i].author, b[i].year);
+    fclose(f);
+}
+```
+
+**Purpose:** Writes entire book array back to disk (overwrites existing file).
+
+**Notes:** Opens file in write mode (creates/truncates) and writes each book line-by-line.
+
+### Load members from file
+
+```c
+int load_members(Member *m) {
+    FILE *f = fopen(DB_MEMBER, "r");
+    int n = 0;
+    if (!f) return 0;
+    while (n < MAXM &&
+           fscanf(f, " %d|%60[^|]|%60[^\n]\n", &m[n].id, m[n].name, m[n].current) == 3)
+        ++n;
+    fclose(f);
+    return n;
+}
+```
+
+**Purpose:** Loads member records from `members.txt` into memory.
+
+**Note:** The `%60[^\n]` captures the current book title or an empty string if none.
+
+### Save members to file
+
+```c
+void save_members(Member *m, int n) {
+    FILE *f = fopen(DB_MEMBER, "w");
+    for (int i = 0; i < n; i++)
+        fprintf(f, "%d|%s|%s\n", m[i].id, m[i].name, m[i].current);
+    fclose(f);
+}
+```
+
+**Purpose:** Persists member array to `members.txt`. An empty `current` field means no book issued.
+
+---
+
+## 4. String Utility Function
+
+### strip — remove leading/trailing whitespace
+
+```c
+void strip(char *s) {
+    char *p = s, *q = s + strlen(s) - 1;
+    while (isspace(*p)) p++;
+    while (q > p && isspace(*q)) q--;
+    q[1] = 0;
+    memmove(s, p, strlen(p) + 1);
+}
+```
+
+**Purpose:** Removes leading and trailing whitespace from user input strings.
+
+**Why:** `fgets` includes the trailing newline; `strip()` cleans input for storage and comparison.
+
+---
+
+## 5. Member Management
+
+### Add new member
+
+```c
+void add_member(Member *m, int *nm) {
+    if (*nm >= MAXM) { puts("Member DB full."); return; }
+    printf("ID   : "); fflush(stdout);
+    scanf("%d", &m[*nm].id); getchar();
+    printf("Name : "); fflush(stdout);
+    fgets(m[*nm].name, FLEN, stdin); strip(m[*nm].name);
+    m[*nm].current[0] = 0;
+    (*nm)++;
+    save_members(m, *nm);
+    puts("Member added.");
+}
+```
+
+**Purpose:** Registers a new member and saves the updated members list.
+
+**Validation:** Rejects if member array is full.
+
+### List all members
+
+```c
+void list_members(Member *m, int nm) {
+    if (!nm) { puts("No members."); return; }
+    puts("\nID  Name                         Issued book");
+    for (int i = 0; i < nm; i++)
+        printf("%-3d %-28s %s\n", m[i].id, m[i].name,
+               m[i].current[0] ? m[i].current : "-none-");
+}
+```
+
+**Purpose:** Displays members with their current book (if any) in a readable table.
+
+---
+
+## 6. Lookup Helper Functions
+
+### Find member by ID
+
+```c
+int find_member(Member *m, int nm, int id) {
+    for (int i = 0; i < nm; i++) if (m[i].id == id) return i;
+    return -1;
+}
+```
+
+### Find book by exact title
+
+```c
+int find_book(Book *b, int nb, const char *title) {
+    for (int i = 0; i < nb; i++) if (strcmp(b[i].title, title) == 0) return i;
+    return -1;
+}
+```
+
+**Note:** These are linear searches (O(n)), which are fine for small arrays.
+
+---
+
+## 7. Circulation Operations
+
+### Issue a book to a member
+
+```c
+void issue_book(Book *b, int nb, Member *m, int nm) {
+    int id; char title[FLEN];
+    printf("Member ID : "); fflush(stdout);
+    scanf("%d", &id); getchar();
+    int mi = find_member(m, nm, id);
+    if (mi < 0) { puts("ID not found."); return; }
+    if (m[mi].current[0]) { printf("Already has book: %s\n", m[mi].current); return; }
+    printf("Book title: "); fflush(stdout);
+    fgets(title, FLEN, stdin); strip(title);
+    int bi = find_book(b, nb, title);
+    if (bi < 0) { puts("Book not found."); return; }
+    /* check not already issued */
+    for (int i = 0; i < nm; i++)
+        if (strcmp(m[i].current, title) == 0) {
+            printf("Book already issued to %s\n", m[i].name); return;
+        }
+    strcpy(m[mi].current, title);
+    save_members(m, nm);
+    puts("Book issued.");
+}
+```
+
+**Purpose:** Issues a book to a member (one book per member).
+
+**Validation:**
+
+* Member exists?
+* Member already has a book?
+* Book exists?
+* Book not already issued to another member?
+
+**Side effect:** Updates `m[mi].current` and persists to disk.
+
+### Return a book
+
+```c
+void return_book(Member *m, int nm) {
+    int id;
+    printf("Member ID returning: "); fflush(stdout);
+    scanf("%d", &id); getchar();
+    int mi = find_member(m, nm, id);
+    if (mi < 0) { puts("ID not found."); return; }
+    if (!m[mi].current[0]) { puts("No book to return."); return; }
+    printf("Returned: %s\n", m[mi].current);
+    m[mi].current[0] = 0;
+    save_members(m, nm);
+}
+```
+
+**Purpose:** Clears the `current` field for a member and saves the updated members list.
+
+---
+
+## 8. Book Management
+
+### Add book
+
+```c
+void add_book(Book *b, int *nb) {
+    if (*nb >= MAXB) { puts("Book DB full."); return; }
+    printf("Title  : "); fflush(stdout);
+    fgets(b[*nb].title, FLEN, stdin);  strip(b[*nb].title);
+    printf("Author : "); fflush(stdout);
+    fgets(b[*nb].author, FLEN, stdin); strip(b[*nb].author);
+    printf("Year   : "); fflush(stdout);
+    scanf("%d", &b[*nb].year); getchar();
+    (*nb)++;
+    save_books(b, *nb);
+    puts("Book added.");
+}
+```
+
+### List books
+
+```c
+void list_books(Book *b, int nb) {
+    if (!nb) { puts("No books."); return; }
+    printf("\n%-35s %-25s %s\n", "TITLE", "AUTHOR", "YEAR");
+    for (int i = 0; i < nb; i++)
+        printf("%-35s %-25s %d\n", b[i].title, b[i].author, b[i].year);
+}
+```
+
+### Search (substring) in titles
+
+```c
+void search_book(Book *b, int nb) {
+    char key[FLEN];
+    printf("Search (title substring): "); fflush(stdout);
+    fgets(key, FLEN, stdin); strip(key);
+    int found = 0;
+    for (int i = 0; i < nb; i++)
+        if (strstr(b[i].title, key)) {
+            printf("%-35s %-25s %d\n", b[i].title, b[i].author, b[i].year);
+            found = 1;
+        }
+    if (!found) puts("Not found.");
+}
+```
+
+### Delete book (exact title)
+
+```c
+void delete_book(Book *b, int *nb, Member *m, int nm) {
+    char key[FLEN];
+    printf("Exact title to delete: "); fflush(stdout);
+    fgets(key, FLEN, stdin); strip(key);
+    /* refuse if anyone currently has it issued */
+    for (int i = 0; i < nm; i++)
+        if (strcmp(m[i].current, key) == 0) {
+            printf("Cannot delete – currently issued to %s\n", m[i].name);
+            return;
+        }
+    int j = 0;
+    for (int i = 0; i < *nb; i++) {
+        if (strcmp(b[i].title, key) == 0) { j++; continue; }
+        if (j) b[i - j] = b[i];
+    }
+    if (j) {
+        *nb -= j;
+        save_books(b, *nb);
+        printf("Deleted %d book(s).\n", j);
+    } else {
+        puts("Title not found – nothing deleted.");
+    }
+}
+```
+
+**Notes:** Deletion compacts the array by shifting later elements left to fill gaps.
+
+---
+
+## 9. Main Program Loop
+
+```c
+int main(void) {
+    Book shelf[MAXB]; int nb = load_books(shelf);
+    Member mem[MAXM]; int nm = load_members(mem);
+    int choice;
+    for (;;) {
+        puts("\n1)Add book 2)List books 3)Search 4)Delete");
+        puts("5)Add member 6)List members 7)Issue 8)Return 0)Quit");
+        printf("> "); fflush(stdout);
+        if (scanf("%d", &choice) != 1) break; getchar();
+        switch (choice) {
+            case 1: add_book(shelf, &nb); break;
+            case 2: list_books(shelf, nb); break;
+            case 3: search_book(shelf, nb); break;
+            case 4: delete_book(shelf, &nb, mem, nm); break;
+            case 5: add_member(mem, &nm); break;
+            case 6: list_members(mem, nm); break;
+            case 7: issue_book(shelf, nb, mem, nm); break;
+            case 8: return_book(mem, nm); break;
+            case 0: return 0;
+            default: puts("Invalid choice.");
+        }
+    }
+    return 0;
+}
+```
+
+**Purpose:** Infinite loop that displays a compact menu and dispatches user commands to the functions above.
+
+**Flow:**
+
+* Load databases at start
+* Show menu
+* Read choice and call function
+* Exit on `0` or EOF
+
+---
+
+## 10. Data File Format Examples
+
+### books.txt
+
+```
+The Hunger Games|Suzanne Collins|2008
+Dune|Frank Herbert|1965
+```
+
+### members.txt
+
+```
+101|Alice|Dune
+102|Bob|
+```
+
+**Notes:** One line per record. No header rows. Keep titles and names simple (no pipes).
+
+---
+
+## 11. Usage Walkthrough (Example Session)
+
+```
+$ ./lib
+1)Add book 2)List books 3)Search 4)Delete
+5)Add member 6)List members 7)Issue 8)Return 0)Quit
+> 5
+ID   : 101
+Name : Alice
+Member added.
+> 1
+Title  : Dune
+Author : Frank Herbert
+Year   : 1965
+Book added.
+> 7
+Member ID : 101
+Book title: Dune
+Book issued.
+> 6
+ID  Name                         Issued book
+101 Alice                        Dune
+> 8
+Member ID returning: 101
+Returned: Dune
+```
+
+---
